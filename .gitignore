@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Env / secrets
+.env
+.env.local
+
+# Local data
+data/*.duckdb
+data/*.duckdb.wal
+data/ticks/
+*.log
+
+# IDE
+.vscode/
+.idea/
+.DS_Store

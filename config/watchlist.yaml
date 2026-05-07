@@ -1,0 +1,34 @@
+# Watchlist configuration.
+#
+# `defaults` apply to every symbol unless overridden under `overrides:<SYMBOL>`.
+#   expiry_window_days  — fetch options expiring within this many days
+#   strike_pct_window   — keep strikes within +/- this fraction of spot
+#                         e.g. 0.25 = strikes in [0.75 * spot, 1.25 * spot]
+#   primary_exchange    — usually SMART; set NASDAQ/NYSE etc only if SMART misroutes
+#
+# Add or remove tickers freely. Aim for 10–50 to stay within IBKR pacing limits.
+
+defaults:
+  expiry_window_days: 120
+  strike_pct_window: 0.25
+  primary_exchange: SMART
+
+tickers:
+  - SPY
+  - QQQ
+  - IWM
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
+
+overrides:
+  SPY:
+    expiry_window_days: 365
+    strike_pct_window: 0.15
+  QQQ:
+    expiry_window_days: 365
+    strike_pct_window: 0.15
