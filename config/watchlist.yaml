@@ -27,7 +27,7 @@ tickers:
 
 overrides:
   SPY:
-    expiry_window_days: 365
+    expiry_window_days: 120
     strike_pct_window: 0.15
   QQQ:
     expiry_window_days: 365

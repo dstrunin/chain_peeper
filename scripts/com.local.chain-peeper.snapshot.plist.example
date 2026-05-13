@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job: runs `uv run scripts/snapshot_daily.py` Mon–Fri at 13:15 PT
+  (16:15 ET = 15 min after US equity market close).
+
+  To use:
+    1. Copy this file:
+         cp scripts/com.local.chain-peeper.snapshot.plist.example \
+            scripts/com.local.chain-peeper.snapshot.plist
+    2. Replace {{REPO_ROOT}} with the absolute path to your clone (e.g.
+       /Users/yourname/code/chain_peeper). It must be an absolute path —
+       launchd does not expand ~ or $HOME.
+    3. Replace {{UV_PATH}} with the output of `which uv`
+       (usually /opt/homebrew/bin/uv on Apple Silicon, /usr/local/bin/uv on Intel).
+    4. Install and load:
+         cp scripts/com.local.chain-peeper.snapshot.plist \
+            ~/Library/LaunchAgents/
+         launchctl load ~/Library/LaunchAgents/com.local.chain-peeper.snapshot.plist
+    5. Verify it's scheduled:
+         launchctl list | grep chain-peeper
+
+  IMPORTANT: TWS or IB Gateway must be running at 13:15 PT for the snapshot
+  to succeed. Stay-logged-in must be enabled in TWS settings, otherwise TWS
+  auto-logs-out daily and the job will fail until you log back in.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.local.chain-peeper.snapshot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{UV_PATH}}</string>
+        <string>run</string>
+        <string>scripts/snapshot_daily.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{REPO_ROOT}}</string>
+
+    <!-- Local time. 13:15 PT = 16:15 ET (15 min after market close). -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>15</integer></dict>
+    </array>
+
+    <key>StartOnMount</key>
+    <false/>
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Log output to repo-local file (gitignored via *.log). -->
+    <key>StandardOutPath</key>
+    <string>{{REPO_ROOT}}/snapshot.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{REPO_ROOT}}/snapshot.log</string>
+
+    <!-- Inherit a sane PATH for uv to find python. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

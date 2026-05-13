@@ -16,6 +16,7 @@ in batches of MKTDATA_BATCH and small sleeps between batches to stay safe.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from dataclasses import dataclass
@@ -27,11 +28,14 @@ from ib_async import IB, Index, Option, Stock, Ticker
 from chain_peeper.config import ibkr_config
 from chain_peeper.watchlist import TickerSpec
 
+log = logging.getLogger(__name__)
+
 # Max number of option contracts subscribed at once. Tune down if you hit
-# "max number of tickers reached" errors.
-MKTDATA_BATCH = 80
-# Per-contract poll budget for snapshot to settle (seconds).
-PER_BATCH_TIMEOUT = 8.0
+# "max number of tickers reached" errors or "Peer closed connection".
+MKTDATA_BATCH = 50
+# Per-contract poll budget (seconds). FROZEN values arrive fast (~1s), but
+# the OI tick lands a beat behind — 7s gives enough headroom for both.
+PER_BATCH_TIMEOUT = 7.0
 
 
 @dataclass
@@ -99,9 +103,26 @@ def _safe_float(x) -> float | None:
     return float(x)
 
 
+def _safe_price(x) -> float | None:
+    """Like _safe_float but treats IBKR's -1 'no data' sentinel as None.
+
+    Prices can never be negative, so any value <= 0 from a price field means
+    'IBKR has no quote' rather than 'price is literally zero'.
+    """
+    f = _safe_float(x)
+    if f is None or f < 0:
+        return None
+    return f
+
+
 def _safe_int(x) -> int | None:
     f = _safe_float(x)
-    return int(f) if f is not None else None
+    if f is None:
+        return None
+    # IBKR also uses -1 as 'not available' for OI/volume.
+    if f < 0:
+        return None
+    return int(f)
 
 
 def _build_underlying(spec: TickerSpec):
@@ -119,6 +140,12 @@ def fetch_chain(ib: IB, spec: TickerSpec) -> ChainSnapshot:
     """Pull and assemble one ticker's options chain. Caller owns the IB connection."""
     snapshot_ts = datetime.now(timezone.utc)
     today = snapshot_ts.date()
+
+    # Use FROZEN market-data mode (type=2) so we get the last cached LIVE
+    # values even when the feed is quiet. During market hours this is
+    # equivalent to LIVE; after close it gives us the EOD bid/ask/IV/Greeks
+    # instead of an endless stream of -1 sentinels.
+    ib.reqMarketDataType(2)
 
     # 1. Underlying — qualify and grab spot
     und = _build_underlying(spec)
@@ -150,10 +177,12 @@ def fetch_chain(ib: IB, spec: TickerSpec) -> ChainSnapshot:
     )
 
     # 3. Filter expiries + strikes
+    # Skip 0DTE — strike menu is sparse (causes Error 200 floods) and intraday
+    # quotes don't tell us much. Phase-3 historical analysis shouldn't care.
     max_exp = today.toordinal() + spec.expiry_window_days
     expiries = sorted(
         e for e in chain.expirations
-        if today.toordinal() <= _to_date(e).toordinal() <= max_exp
+        if today.toordinal() < _to_date(e).toordinal() <= max_exp
     )
     lo = spot * (1 - spec.strike_pct_window)
     hi = spot * (1 + spec.strike_pct_window)
@@ -165,6 +194,11 @@ def fetch_chain(ib: IB, spec: TickerSpec) -> ChainSnapshot:
             f"No contracts match window for {spec.symbol}: "
             f"{len(expiries)} expiries, {len(strikes)} strikes"
         )
+
+    log.info(
+        "%s: spot=%.2f, %d expiries × %d strikes × 2 sides = %d contracts",
+        spec.symbol, spot, len(expiries), len(strikes), len(expiries) * len(strikes) * 2,
+    )
 
     # 4. Build, qualify, and request market data in batches
     contracts: list[Option] = []
@@ -188,13 +222,18 @@ def fetch_chain(ib: IB, spec: TickerSpec) -> ChainSnapshot:
     cfg = ibkr_config()
     timeout = max(cfg.mktdata_timeout, PER_BATCH_TIMEOUT)
 
+    n_batches = (len(contracts) + MKTDATA_BATCH - 1) // MKTDATA_BATCH
     for i in range(0, len(contracts), MKTDATA_BATCH):
         batch = contracts[i : i + MKTDATA_BATCH]
+        batch_idx = i // MKTDATA_BATCH + 1
+        log.info("%s: batch %d/%d (%d contracts)", spec.symbol, batch_idx, n_batches, len(batch))
         try:
             qualified = ib.qualifyContracts(*batch)
         except Exception:
             qualified = []
-        qualified = [c for c in qualified if c.conId]
+        # qualifyContracts returns None in the slot for any contract it can't
+        # resolve (typically Error 200 — strike doesn't exist for that expiry).
+        qualified = [c for c in qualified if c is not None and getattr(c, "conId", 0)]
         if not qualified:
             continue
 
@@ -202,18 +241,28 @@ def fetch_chain(ib: IB, spec: TickerSpec) -> ChainSnapshot:
             ib.reqMktData(c, "100,101,106", snapshot=False, regulatorySnapshot=False)
             for c in qualified
         ]
-        # Wait until each ticker has at least one of bid/ask/last/iv populated,
-        # or we run out of budget.
+        # Wait until each ticker has BOTH (a) modelGreeks-or-real-quote AND
+        # (b) an OI tick. Earlier we broke as soon as Greeks arrived, but the
+        # OI tick (type 101) lands a beat later — cancelling the subscription
+        # at break-time meant we lost OI on most contracts.
+        def _has_real_data(t: Ticker) -> bool:
+            has_greeks = (
+                t.modelGreeks is not None
+                and getattr(t.modelGreeks, "delta", None) is not None
+            )
+            has_quote = (
+                _safe_price(t.bid) is not None and _safe_price(t.ask) is not None
+            )
+            # Either side's OI counts — we only consume the matching one later.
+            oi_call = _safe_int(t.callOpenInterest)
+            oi_put = _safe_int(t.putOpenInterest)
+            has_oi = oi_call is not None or oi_put is not None
+            return (has_greeks or has_quote) and has_oi
+
         deadline = time.time() + timeout
         while time.time() < deadline:
             ib.sleep(0.25)
-            if all(
-                (t.bid is not None and not (isinstance(t.bid, float) and math.isnan(t.bid)))
-                or (t.ask is not None and not (isinstance(t.ask, float) and math.isnan(t.ask)))
-                or (t.last is not None and not (isinstance(t.last, float) and math.isnan(t.last)))
-                or t.modelGreeks is not None
-                for t in tickers
-            ):
+            if all(_has_real_data(t) for t in tickers):
                 break
 
         for c, t in zip(qualified, tickers):
@@ -229,9 +278,9 @@ def fetch_chain(ib: IB, spec: TickerSpec) -> ChainSnapshot:
                     "right": c.right,
                     "exchange": c.exchange,
                     "multiplier": int(c.multiplier) if c.multiplier else 100,
-                    "bid": _safe_float(t.bid),
-                    "ask": _safe_float(t.ask),
-                    "last": _safe_float(t.last),
+                    "bid": _safe_price(t.bid),
+                    "ask": _safe_price(t.ask),
+                    "last": _safe_price(t.last),
                     "iv": _greek_attr(t, "impliedVol"),
                     "delta": _greek_attr(t, "delta"),
                     "gamma": _greek_attr(t, "gamma"),

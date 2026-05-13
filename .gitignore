@@ -19,6 +19,9 @@ data/*.duckdb.wal
 data/ticks/
 *.log
 
+# Local-only launchd plist (your absolute path baked in)
+scripts/com.local.chain-peeper.snapshot.plist
+
 # IDE
 .vscode/
 .idea/
